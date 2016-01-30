@@ -60,7 +60,7 @@
 ;; each application:
 ;;
 ;; Finder.app - grab links to the selected files in the frontmost window
-;; Mail.app - grab links to the selected messages in the message list
+;; Mail.app - grab links to the selected messages in the message list, optionally insert message contents.
 ;; AddressBook.app - Grab links to the selected addressbook Cards
 ;; Firefox.app - Grab the url of the frontmost tab in the frontmost window
 ;; Vimperator/Firefox.app - Grab the url of the frontmost tab in the frontmost window
@@ -113,6 +113,12 @@
 (defcustom org-mac-grab-Mail-app-p t
   "Add menu option [m]ail to grab links from Mail.app."
   :tag "Grab Mail.app links"
+  :group 'org-mac-link
+  :type 'boolean)
+
+(defcustom org-mac-grab-Mail-msg-app-p t
+  "Add menu option [M]ail to grab links and selected message contents from Mail.app."
+  :tag "Grab Mail.app messages"
   :group 'org-mac-link
   :type 'boolean)
 
@@ -240,6 +246,7 @@ When done, go grab the link, and insert it at point."
   (let* ((descriptors
 	  `(("F" "inder" org-mac-finder-insert-selected ,org-mac-grab-Finder-app-p)
 	    ("m" "ail" org-mac-message-insert-selected ,org-mac-grab-Mail-app-p)
+	    ("M" "mail msg" org-mac-message-det-insert-selected ,org-mac-grab-Mail-msg-app-p)
 	    ("d" "EVONthink Pro Office" org-mac-devonthink-item-insert-selected
 	     ,org-mac-grab-devonthink-app-p)
 	    ("o" "utlook" org-mac-outlook-message-insert-selected ,org-mac-grab-Outlook-app-p)
@@ -942,6 +949,107 @@ list of message:// links to flagged mail after heading."
 	(insert "\n")
 	(org-insert-heading nil t)
 	(insert org-heading "\n" (org-mac-message-get-links "f"))))))
+
+;; Mail Content insertion into linked headings.
+
+(defun org-mac-message-det-insert-selected ()
+  "Insert a link to the message currently selected in Mail.app and its contents as text.
+   This will use AppleScript to get the message-id, sender,
+   date and the subject of the active mail in Mail.app.  When
+   more than one message is present in the Mail thread the Applescript
+   will prompt for which messages you wish to include.  Each
+   message is linked to by its subject as a heading, followed by
+   the sender and date as a definition list, followed by the
+   contents of the Mail.  When called from a heading line the
+   first link is included on that heading with subsequent
+   messages demoted underneath it."
+  (interactive)
+  (message "org-mac-link: grabbing Mail selection...")
+    (save-excursion
+    (let ((start (point)) (on-heading (outline-on-heading-p t)) (do-demote t) end)
+      (org-mac-paste-applescript-mail (org-as-get-selected-mail-det))
+      (setq end (point))
+      (goto-char start)
+      (if on-heading
+	  (progn
+	    (search-forward "::SPLIT::" end t)
+	    (replace-match "")))
+      (while (re-search-forward "^::SPLIT::" end t)
+	(replace-match "")
+	(org-insert-heading)
+	(if do-demote
+	    (progn (org-do-demote) (setq do-demote nil))
+	  ))))
+    (message "org-mac-link: finished grabbing mail.")
+    (do-applescript "tell application \"Finder\" to set visible of process \"Mail\" to false\n")
+)
+
+(defun org-mac-paste-applescript-mail (msgs)
+  "Paste in mail contents "
+  (let* ((noquote-msgs
+	  (if (string-prefix-p "\"" msgs)
+	      (substring msgs 1 -1)
+	    msgs))
+         split-link URL description orglink orglink-insert rtn orglink-list)
+    (insert noquote-msgs)))
+
+(defun org-as-get-selected-mail-det ()
+  "AppleScript to get mail message contents and create links to selected messages in Mail.app."
+  (do-applescript
+   (concat
+    "tell application \"Mail\"\n"
+	"set ctrlJ to character id 10\n"
+	"set theSelection to selection\n"
+	"set theCount to count selection\n"
+	"set theIdList to {}\n"
+	"set theMails to {}\n"
+	"set maxSubj to 50\n"
+	"set output to \"\"\n"
+	"if theCount is 0 then return\n"
+	"if (theCount is 1) then\n"
+		"set theMessage to item 1 of theSelection\n"
+		"set theIdList to (id of theMessage)\n"
+	"end if\n"
+	"if (theCount > 1) then\n"
+		"set theChoices to {} -- make an empty list\n"
+		"repeat with eachMessage in theSelection\n"
+			"set theSubject to subject of eachMessage\n"
+			"set theSubjLen to length of theSubject\n"
+			"if theSubjLen > maxSubj then\n"
+				"set theSubject to rich text 1 thru (maxSubj - 3) of theSubject & \"...\"\n"
+			"else\n"
+				"repeat with theInc from theSubjLen to maxSubj\n"
+					"set theSubject to theSubject & \" \"\n"
+				"end repeat\n"
+			"end if\n"
+			"set theSender to extract name from sender of eachMessage\n"
+			"set theId to (id of eachMessage as rich text)\n"
+			"set theDate to (date received) of eachMessage\n"
+			"set beginning of theChoices to theId & \": \" & theSubject & tab & theSender & \" \" & theDate\n"
+		"end repeat\n"
+		"set theAction to choose from list theChoices default items {} with prompt \"Select which emails\" with title \"emacs grab - which?\" with multiple selections allowed\n"
+		"if theAction is false then return\n"
+		"repeat with eachAction in theAction\n"
+			"set theOffset to offset of \":\" in eachAction\n"
+			"set theId to (rich text 1 thru (theOffset - 1) of eachAction as number)\n"
+			"set end of theIdList to theId\n"
+		"end repeat\n"
+	"end if\n"
+	"repeat with eachMessage in theSelection\n"
+		"set theId to id of eachMessage\n"
+		"if theIdList contains theId then\n"
+			"set theMsgId to message id of eachMessage\n"
+			"set theSubject to subject of eachMessage\n"
+			"set theContent to (content of eachMessage as rich text)\n"
+			"set theSender to sender of eachMessage\n"
+			"set theDate to (date received) of eachMessage\n"
+			"set theLink to \"[[message://\" & theMsgId & \"][\" & theSubject & \"]]\"\n"
+			"set output to (\"::SPLIT::\" & theLink & ctrlJ & \"- Sender :: \" & theSender & ctrlJ & \"- Date :: \" & theDate & ctrlJ & \"#+BEGIN_EXAMPLE\" & ctrlJ & theContent & ctrlJ & \"#+END_EXAMPLE\" & ctrlJ)\n"
+			"copy output to the end of theMails\n"
+		"end if\n"
+	"end repeat\n"
+	"return theMails as string\n"
+	"end tell\n")))
 
 
 (provide 'org-mac-link)
